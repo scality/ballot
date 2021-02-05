@@ -1,0 +1,72 @@
+on:
+  push:
+    tags:
+    - 'v*'
+
+name: Upload Release Asset
+
+jobs:
+  build:
+    name: Upload Release Asset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.15
+
+      - name: Install Ginkgo
+        run: go get github.com/onsi/ginkgo/ginkgo
+
+      - name: Get version
+        run: echo VERSION=$(git describe --tags) >> $GITHUB_ENV
+
+      - name: Build release artifacts
+        run: make artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ env.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Tarball
+        id: upload-tarball
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./out/ballot-${{ env.VERSION }}.tgz
+          asset_name: ballot-${{ env.VERSION }}.tgz
+          asset_content_type: application/tar+gzip
+
+      - name: Upload Linux amd64 binary
+        id: upload-linux-amd64
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-linux-amd64
+          asset_name: ballot-${{ env.VERSION }}-linux-amd64
+          asset_content_type: application/octet-stream
+
+      - name: Upload MacOS amd64 binary
+        id: upload-darwin-amd64
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-darwin-amd64
+          asset_name: ballot-${{ env.VERSION }}-darwin-amd64
+          asset_content_type: application/octet-stream
