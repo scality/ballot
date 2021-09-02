@@ -37,7 +37,7 @@ var (
 
 const (
 	defaultMaxRandomWaitDuration = 2 * time.Second
-	defaultHeartbeatInterval     = 60 * time.Second
+	defaultHeartbeatInterval     = 30 * time.Second
 )
 
 type ZooKeeperElection struct {
@@ -168,15 +168,20 @@ func (e *ZooKeeperElection) getPreviousProposal() (string, error) {
 		return "", fmt.Errorf("own proposal node '%s' disappeared: %w", e.proposalNodePath, errMustReelect)
 	}
 
-	e.log.Infof("am number %d in line to become leader", rank)
+	e.log.Infof("am number %d in line to become leader, proposal %s", rank, e.proposalNodePath)
 
 	return previousNode, nil
 }
 
-func (e *ZooKeeperElection) waitForNodeDeletion(ctx context.Context, node string) error {
+func (e *ZooKeeperElection) waitForNodeChange(ctx context.Context, node string) error {
 	watch, err := e.zk.Watch(node)
 	if err != nil {
 		return fmt.Errorf("node watch %s: %w", node, err)
+	}
+
+	baseWatch, err := e.zk.WatchChildren(e.basePath)
+	if err != nil {
+		return fmt.Errorf("base path watch %s: %w", e.basePath, err)
 	}
 
 	e.log.Debugf("waiting for node %s to disappear", node)
@@ -198,6 +203,19 @@ func (e *ZooKeeperElection) waitForNodeDeletion(ctx context.Context, node string
 			}
 
 			e.log.Debugf("ignoring event type %s on node %s", ev.Type, node)
+
+		case ev, ok := <-baseWatch:
+			if !ok {
+				return fmt.Errorf("node watch on %s was closed: %w", e.basePath, errNodeWatchClosed)
+			}
+
+			if ev.Type == zk.EventNodeChildrenChanged {
+				e.log.Debugf("%s children changed", e.basePath)
+
+				return nil
+			}
+
+			e.log.Debugf("ignoring event type %s on path %s", ev.Type, e.basePath)
 
 		case <-time.After(e.heartbeatInterval):
 			return nil
@@ -268,7 +286,7 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		} else {
 			e.log.Info("waiting for leader to resign")
 
-			err = e.waitForNodeDeletion(ctx, prev)
+			err = e.waitForNodeChange(ctx, prev)
 			if err != nil {
 				return fmt.Errorf("leader election follower wait: %w", err)
 			}

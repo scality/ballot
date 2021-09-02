@@ -552,6 +552,9 @@ type mockZkClient struct {
 	returnErrorForWatch  error
 	watchingCheckpointCh chan struct{}
 
+	returnChForWatchChildren    chan zk.Event
+	returnErrorForWatchChildren error
+
 	calledHasSessionNTimes int
 	returnForHasSession    []bool
 }
@@ -597,6 +600,10 @@ func (z *mockZkClient) Watch(path string) (<-chan zk.Event, error) {
 	}
 
 	return z.returnChForWatch, z.returnErrorForWatch
+}
+
+func (z *mockZkClient) WatchChildren(path string) (<-chan zk.Event, error) {
+	return z.returnChForWatchChildren, z.returnErrorForWatchChildren
 }
 
 func (z *mockZkClient) HasSession() bool {
