@@ -55,8 +55,11 @@ func (z *defaultZkClient) CreateNodeSequenceEphemeral(path string, data []byte) 
 
 func (z *defaultZkClient) CreateNode(path string) error {
 	_, err := z.conn.Create(path, nil, 0, zk.WorldACL(zk.PermAll))
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
 
-	return fmt.Errorf("create: %w", err)
+	return nil
 }
 
 func (z *defaultZkClient) Delete(path string) error {
