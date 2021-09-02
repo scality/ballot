@@ -34,6 +34,7 @@ var (
 	errNodeWatchClosed = errors.New("watch channel on znode was closed")
 
 	defaultMaxRandomWaitDuration = 2 * time.Second
+	defaultHeartbeatInterval     = 60 * time.Second
 )
 
 type ZooKeeperElection struct {
@@ -43,6 +44,7 @@ type ZooKeeperElection struct {
 	proposalNodePath      string
 	sessionTimeout        time.Duration
 	maxRandomWaitDuration time.Duration
+	heartbeatInterval     time.Duration
 	zk                    zkClient
 }
 
@@ -64,6 +66,7 @@ func newElectionWithZkClient(zk zkClient, electionPath string, candidateID strin
 		candidateID:           candidateID,
 		sessionTimeout:        sessionTimeout,
 		maxRandomWaitDuration: defaultMaxRandomWaitDuration,
+		heartbeatInterval:     defaultHeartbeatInterval,
 		log:                   l,
 	}
 }
@@ -177,6 +180,9 @@ func (e *ZooKeeperElection) waitForNodeDeletion(ctx context.Context, node string
 			}
 
 			e.log.Debugf("ignoring event type %s on node %s", ev.Type, node)
+
+		case <-time.After(e.heartbeatInterval):
+			return nil
 		}
 	}
 }
