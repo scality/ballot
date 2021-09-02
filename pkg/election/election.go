@@ -31,8 +31,11 @@ import (
 )
 
 var (
+	errMustReelect     = errors.New("proposals stale, must reelect")
 	errNodeWatchClosed = errors.New("watch channel on znode was closed")
+)
 
+const (
 	defaultMaxRandomWaitDuration = 2 * time.Second
 	defaultHeartbeatInterval     = 60 * time.Second
 )
@@ -145,15 +148,24 @@ func (e *ZooKeeperElection) getPreviousProposal() (string, error) {
 
 	previousNode := ""
 	rank := 1
+	foundOwn := false
 
 	for _, n := range nodes {
 		nodePath := path.Join(e.basePath, n)
 		if nodePath == e.proposalNodePath {
+			foundOwn = true
+
 			break
 		}
 
 		previousNode = nodePath
 		rank++
+	}
+
+	if e.proposalNodePath != "" && !foundOwn {
+		e.log.Warnf("cannot get previous proposal, own proposal '%s' disappeared", e.proposalNodePath)
+
+		return "", fmt.Errorf("own proposal node '%s' disappeared: %w", e.proposalNodePath, errMustReelect)
 	}
 
 	e.log.Infof("am number %d in line to become leader", rank)

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-zookeeper/zk"
@@ -33,17 +34,48 @@ var (
 	errNoNode = fmt.Errorf("test error: %w", zk.ErrNoNode)
 )
 
+// threadsafe subset of bytes.Buffer
+type byteBuffer struct {
+	b bytes.Buffer
+	m sync.Mutex
+}
+
+func (b *byteBuffer) Read(p []byte) (int, error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+
+	return b.b.Read(p)
+}
+
+func (b *byteBuffer) Write(p []byte) (int, error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+
+	return b.b.Write(p)
+}
+
+func (b *byteBuffer) String() string {
+	b.m.Lock()
+	defer b.m.Unlock()
+
+	return b.b.String()
+}
+
+func (b *byteBuffer) Len() int {
+	b.m.Lock()
+	defer b.m.Unlock()
+
+	return b.b.Len()
+}
+
 var _ = Describe("Election", func() {
 	var ctx context.Context
-	var logs *bytes.Buffer
+	var logs *byteBuffer
 
 	timeout := 100 * time.Millisecond
 	electionJitter := time.Millisecond
 	basePath := "/ballot/test/election"
-	logger := logrus.New()
-	logger.SetLevel(logrus.TraceLevel)
-	logger.ReportCaller = true
-	l := logrus.NewEntry(logger)
+	var l *logrus.Entry
 
 	createElection := func(zk zkClient) *ZooKeeperElection {
 		e := newElectionWithZkClient(zk, basePath, "id1", timeout, l)
@@ -58,8 +90,14 @@ var _ = Describe("Election", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		logs = bytes.NewBuffer(nil)
+		logs = &byteBuffer{}
+
+		logger := logrus.New()
+		logger.SetLevel(logrus.TraceLevel)
+		logger.ReportCaller = true
 		logger.Out = logs
+
+		l = logrus.NewEntry(logger)
 	})
 
 	AfterEach(func() {
@@ -130,6 +168,9 @@ var _ = Describe("Election", func() {
 				returnForHasSession:                      []bool{true},
 				returnForCreateNode:                      zk.ErrNodeExists,
 				returnPathForCreateNodeSequenceEphemeral: basePath + "/p001",
+				returnChildrenForListChildren: [][]string{
+					{"p001"},
+				},
 			}
 
 			e := createElection(zkMock)
@@ -335,6 +376,36 @@ var _ = Describe("Election", func() {
 			}
 		}, 1)
 
+		It("should fail election if own proposal node disappeared", func(done Done) {
+			defer flushTest(done)
+
+			becomeLeaderDoneCh := make(chan error)
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p003",
+				returnChildrenForListChildren: [][]string{
+					{"p002"},
+				},
+			}
+
+			e := createElection(zkMock)
+
+			go func() {
+				defer GinkgoRecover()
+
+				becomeLeaderDoneCh <- e.BecomeLeader(ctx)
+			}()
+
+			select {
+			case err := <-becomeLeaderDoneCh:
+				Expect(err).To(MatchError(errMustReelect))
+
+			case <-time.After(timeout):
+				Fail("should have returned from BecomeLeader but has not")
+			}
+		}, 1)
+
 		It("should bail if context canceled while waiting for leader to yield", func(done Done) {
 			defer flushTest(done)
 
@@ -392,6 +463,9 @@ var _ = Describe("Election", func() {
 			zkMock := &mockZkClient{
 				returnForHasSession:                      []bool{true},
 				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
+				returnChildrenForListChildren: [][]string{
+					{"p003"},
+				},
 			}
 			e := createElection(zkMock)
 
@@ -413,6 +487,9 @@ var _ = Describe("Election", func() {
 				returnForHasSession:                      []bool{true},
 				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
 				returnForDelete:                          errNoNode,
+				returnChildrenForListChildren: [][]string{
+					{"p003"},
+				},
 			}
 			e := createElection(zkMock)
 
@@ -434,6 +511,9 @@ var _ = Describe("Election", func() {
 				returnForHasSession:                      []bool{true},
 				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
 				returnForDelete:                          errTest,
+				returnChildrenForListChildren: [][]string{
+					{"p003"},
+				},
 			}
 			e := createElection(zkMock)
 
