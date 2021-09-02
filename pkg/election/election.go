@@ -104,6 +104,12 @@ func (e *ZooKeeperElection) createProposalNode() error {
 func (e *ZooKeeperElection) deleteProposalNode() error {
 	err := e.zk.Delete(e.proposalNodePath)
 	if err != nil {
+		if errors.Is(err, zk.ErrNoNode) {
+			e.log.Debugf("own proposal node %s already gone while trying to delete", e.proposalNodePath)
+
+			return nil
+		}
+
 		return fmt.Errorf("delete own proposal node: %s: %w", e.proposalNodePath, err)
 	}
 

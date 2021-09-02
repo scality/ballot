@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,7 +28,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var errTest = errors.New("testing")
+var (
+	errTest   = errors.New("testing")
+	errNoNode = fmt.Errorf("test error: %w", zk.ErrNoNode)
+)
 
 var _ = Describe("Election", func() {
 	var ctx context.Context
@@ -388,6 +392,27 @@ var _ = Describe("Election", func() {
 			zkMock := &mockZkClient{
 				returnForHasSession:                      []bool{true},
 				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
+			}
+			e := createElection(zkMock)
+
+			err := e.BecomeLeader(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(e.proposalNodePath).To(Equal(proposalNodePath))
+
+			err = e.Resign(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(e.proposalNodePath).To(BeEmpty())
+			Expect(zkMock.calledDeleteWith).To(Equal([]string{proposalNodePath}))
+		})
+
+		It("should succeed if proposal node is already gone", func() {
+			proposalNodePath := basePath + "/p003"
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
+				returnForDelete:                          errNoNode,
 			}
 			e := createElection(zkMock)
 
