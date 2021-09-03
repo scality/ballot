@@ -31,9 +31,13 @@ import (
 )
 
 var (
+	errMustReelect     = errors.New("proposals stale, must reelect")
 	errNodeWatchClosed = errors.New("watch channel on znode was closed")
+)
 
+const (
 	defaultMaxRandomWaitDuration = 2 * time.Second
+	defaultHeartbeatInterval     = 30 * time.Second
 )
 
 type ZooKeeperElection struct {
@@ -43,6 +47,7 @@ type ZooKeeperElection struct {
 	proposalNodePath      string
 	sessionTimeout        time.Duration
 	maxRandomWaitDuration time.Duration
+	heartbeatInterval     time.Duration
 	zk                    zkClient
 }
 
@@ -64,6 +69,7 @@ func newElectionWithZkClient(zk zkClient, electionPath string, candidateID strin
 		candidateID:           candidateID,
 		sessionTimeout:        sessionTimeout,
 		maxRandomWaitDuration: defaultMaxRandomWaitDuration,
+		heartbeatInterval:     defaultHeartbeatInterval,
 		log:                   l,
 	}
 }
@@ -101,6 +107,12 @@ func (e *ZooKeeperElection) createProposalNode() error {
 func (e *ZooKeeperElection) deleteProposalNode() error {
 	err := e.zk.Delete(e.proposalNodePath)
 	if err != nil {
+		if errors.Is(err, zk.ErrNoNode) {
+			e.log.Debugf("own proposal node %s already gone while trying to delete", e.proposalNodePath)
+
+			return nil
+		}
+
 		return fmt.Errorf("delete own proposal node: %s: %w", e.proposalNodePath, err)
 	}
 
@@ -136,10 +148,13 @@ func (e *ZooKeeperElection) getPreviousProposal() (string, error) {
 
 	previousNode := ""
 	rank := 1
+	foundOwn := false
 
 	for _, n := range nodes {
 		nodePath := path.Join(e.basePath, n)
 		if nodePath == e.proposalNodePath {
+			foundOwn = true
+
 			break
 		}
 
@@ -147,15 +162,26 @@ func (e *ZooKeeperElection) getPreviousProposal() (string, error) {
 		rank++
 	}
 
-	e.log.Infof("am number %d in line to become leader", rank)
+	if e.proposalNodePath != "" && !foundOwn {
+		e.log.Warnf("cannot get previous proposal, own proposal '%s' disappeared", e.proposalNodePath)
+
+		return "", fmt.Errorf("own proposal node '%s' disappeared: %w", e.proposalNodePath, errMustReelect)
+	}
+
+	e.log.Infof("am number %d in line to become leader, proposal %s", rank, e.proposalNodePath)
 
 	return previousNode, nil
 }
 
-func (e *ZooKeeperElection) waitForNodeDeletion(ctx context.Context, node string) error {
+func (e *ZooKeeperElection) waitForNodeChange(ctx context.Context, node string) error {
 	watch, err := e.zk.Watch(node)
 	if err != nil {
 		return fmt.Errorf("node watch %s: %w", node, err)
+	}
+
+	baseWatch, err := e.zk.WatchChildren(e.basePath)
+	if err != nil {
+		return fmt.Errorf("base path watch %s: %w", e.basePath, err)
 	}
 
 	e.log.Debugf("waiting for node %s to disappear", node)
@@ -177,6 +203,22 @@ func (e *ZooKeeperElection) waitForNodeDeletion(ctx context.Context, node string
 			}
 
 			e.log.Debugf("ignoring event type %s on node %s", ev.Type, node)
+
+		case ev, ok := <-baseWatch:
+			if !ok {
+				return fmt.Errorf("node watch on %s was closed: %w", e.basePath, errNodeWatchClosed)
+			}
+
+			if ev.Type == zk.EventNodeChildrenChanged {
+				e.log.Debugf("%s children changed", e.basePath)
+
+				return nil
+			}
+
+			e.log.Debugf("ignoring event type %s on path %s", ev.Type, e.basePath)
+
+		case <-time.After(e.heartbeatInterval):
+			return nil
 		}
 	}
 }
@@ -244,7 +286,7 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		} else {
 			e.log.Info("waiting for leader to resign")
 
-			err = e.waitForNodeDeletion(ctx, prev)
+			err = e.waitForNodeChange(ctx, prev)
 			if err != nil {
 				return fmt.Errorf("leader election follower wait: %w", err)
 			}

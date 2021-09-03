@@ -28,6 +28,7 @@ type zkClient interface {
 	Delete(path string) error
 	ListChildren(path string) ([]string, error)
 	Watch(path string) (<-chan zk.Event, error)
+	WatchChildren(path string) (<-chan zk.Event, error)
 	HasSession() bool
 }
 
@@ -55,8 +56,11 @@ func (z *defaultZkClient) CreateNodeSequenceEphemeral(path string, data []byte) 
 
 func (z *defaultZkClient) CreateNode(path string) error {
 	_, err := z.conn.Create(path, nil, 0, zk.WorldACL(zk.PermAll))
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
 
-	return fmt.Errorf("create: %w", err)
+	return nil
 }
 
 func (z *defaultZkClient) Delete(path string) error {
@@ -76,6 +80,15 @@ func (z *defaultZkClient) Watch(path string) (<-chan zk.Event, error) {
 	_, _, ch, err := z.conn.GetW(path)
 	if err != nil {
 		return nil, fmt.Errorf("watch: %w", err)
+	}
+
+	return ch, nil
+}
+
+func (z *defaultZkClient) WatchChildren(path string) (<-chan zk.Event, error) {
+	_, _, ch, err := z.conn.ChildrenW(path)
+	if err != nil {
+		return nil, fmt.Errorf("childrenwatch: %w", err)
 	}
 
 	return ch, nil
