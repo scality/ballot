@@ -24,6 +24,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
+
 	"time"
 
 	"github.com/go-zookeeper/zk"
@@ -49,6 +51,8 @@ type ZooKeeperElection struct {
 	maxRandomWaitDuration time.Duration
 	heartbeatInterval     time.Duration
 	zk                    zkClient
+	leaderResignChan      chan struct{}
+	mu                    sync.Mutex
 }
 
 func NewZooKeeperElection(servers []string, electionPath string, candidateID string, sessionTimeout time.Duration, debug bool, l *logrus.Entry) (*ZooKeeperElection, error) {
@@ -74,29 +78,63 @@ func newElectionWithZkClient(zk zkClient, electionPath string, candidateID strin
 	}
 }
 
-func (e *ZooKeeperElection) createProposalNode() error {
+func (e *ZooKeeperElection) serializeCandidateInfo() []byte {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "(unknown)"
 	}
 
 	candidateInfo := map[string]string{
-		"candidateId":  e.candidateID,
-		"hostname":     hostname,
-		"pid":          fmt.Sprint(os.Getpid()),
-		"proposalTime": time.Now().String(),
-		// TODO add session timeout
+		"candidateId":    e.candidateID,
+		"hostname":       hostname,
+		"pid":            fmt.Sprint(os.Getpid()),
+		"proposalTime":   time.Now().String(),
+		"sessionTimeout": e.sessionTimeout.String(),
 	}
 
 	data, err := json.Marshal(candidateInfo)
 	if err != nil {
-		data = []byte(fmt.Sprintf(`{"candidateId": "%s"}`, e.candidateID))
+		e.log.Warn("could not serialize candidate info", err)
+
+		return []byte(fmt.Sprintf(`{"candidateId": "%s"}`, e.candidateID))
 	}
 
-	ownPath, err := e.zk.CreateNodeSequenceEphemeral(e.basePath+"/proposal-", data)
+	return data
+}
+
+func (e *ZooKeeperElection) serializeLeaderInfoUnlocked() []byte {
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "(unknown)"
+	}
+
+	leaderInfo := map[string]string{
+		"proposalNode":   e.proposalNodePath,
+		"candidateId":    e.candidateID,
+		"hostname":       hostname,
+		"pid":            fmt.Sprint(os.Getpid()),
+		"lastSeenTime":   time.Now().String(),
+		"sessionTimeout": e.sessionTimeout.String(),
+	}
+
+	data, err := json.Marshal(leaderInfo)
+	if err != nil {
+		e.log.Warn("could not serialize leader info", err)
+
+		return []byte(fmt.Sprintf(`{"proposalNode": "%s"}`, e.proposalNodePath))
+	}
+
+	return data
+}
+
+func (e *ZooKeeperElection) createProposalNode() error {
+	ownPath, err := e.zk.CreateNodeSequenceEphemeral(e.basePath+"/proposal-", e.serializeCandidateInfo())
 	if err != nil {
 		return fmt.Errorf("zk create proposal znode: %w", err)
 	}
+
+	e.lock("createProposalNode")
+	defer e.unlock("createProposalNode")
 
 	e.log.Debugf("own proposal zk node %s", ownPath)
 	e.proposalNodePath = ownPath
@@ -104,7 +142,7 @@ func (e *ZooKeeperElection) createProposalNode() error {
 	return nil
 }
 
-func (e *ZooKeeperElection) deleteProposalNode() error {
+func (e *ZooKeeperElection) deleteProposalNodeUnlocked() error {
 	err := e.zk.Delete(e.proposalNodePath)
 	if err != nil {
 		if errors.Is(err, zk.ErrNoNode) {
@@ -149,6 +187,9 @@ func (e *ZooKeeperElection) getPreviousProposal() (string, error) {
 	previousNode := ""
 	rank := 1
 	foundOwn := false
+
+	e.lock("getPreviousProposal")
+	defer e.unlock("getPreviousProposal")
 
 	for _, n := range nodes {
 		nodePath := path.Join(e.basePath, n)
@@ -217,6 +258,14 @@ func (e *ZooKeeperElection) waitForNodeChange(ctx context.Context, node string) 
 
 			e.log.Debugf("ignoring event type %s on path %s", ev.Type, e.basePath)
 
+		case ev, ok := <-e.zk.Events():
+			// Dequeue events from the channel even if we don't use them
+			if !ok {
+				return fmt.Errorf("zookeeper connection events chan closed")
+			}
+
+			e.log.Debugf("connection event %v", ev)
+
 		case <-time.After(e.heartbeatInterval):
 			return nil
 		}
@@ -277,10 +326,24 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 			return fmt.Errorf("leader election: %w", err)
 		}
 
-		isLeader := prev == ""
+		hasLowestProposal := prev == ""
 
-		if isLeader {
-			e.log.Debug("am leader, continuing")
+		if hasLowestProposal {
+			if e.hasActiveLeader() {
+				// It is possible to have the lowest proposal and not be the
+				// actual leader, if all the previous ephemeral nodes have been
+				// auto-expired and there's still a leader running the process.
+				// This can happen when communication between ballot processes
+				// and the zookeeper ensemble has been cut for longer than the
+				// session timeout.
+				sleep := e.sessionTimeout / 2
+				e.log.Infof("election is being held while there's an active leader, retrying in %s", sleep.String())
+				<-time.After(sleep)
+
+				continue
+			}
+
+			e.log.Info("am leader, continuing")
 
 			break
 		} else {
@@ -295,12 +358,104 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		}
 	}
 
+	e.claimLeaderRole(ctx)
+
 	return nil
 }
 
+func convertMsEpochToTime(ms int64) time.Time {
+	return time.Unix(ms/1000, (ms%1000)*1_000_000)
+}
+
+func (e *ZooKeeperElection) hasActiveLeader() bool {
+	e.log.Info("checking if there is an active leader")
+
+	data, stat, err := e.zk.Get(e.basePath)
+	if err != nil {
+		e.log.Errorf("could not get leader node %s, assuming another leader is active: %v", e.basePath, err)
+
+		// if we can't reach zk, assume there's already a
+		// leader, as we don't want to risk a split brain
+		// election
+		return true
+	}
+
+	mtime := convertMsEpochToTime(stat.Mtime)
+	since := time.Since(mtime)
+	hasActiveLeader := since < e.sessionTimeout && len(data) > 0
+
+	e.log.Debugf("active leader info: hasActiveLeader=%v descr=%s since=%s threshold=%s",
+		hasActiveLeader, string(data), since.String(), e.sessionTimeout.String())
+
+	if hasActiveLeader {
+		e.log.Infof("active leader '%s' was seen %s ago", string(data), since.String())
+	}
+
+	return hasActiveLeader
+}
+
+func (e *ZooKeeperElection) clearLeaderRole() {
+	e.lock("clearLeaderRole")
+	defer e.unlock("clearLeaderRole")
+
+	err := e.zk.Set(e.basePath, []byte{}, -1)
+	if err != nil {
+		e.log.Errorf("could not clear leader role: %v", err)
+	}
+}
+
+func (e *ZooKeeperElection) publishLeaderRole() {
+	e.lock("publishLeaderRole")
+	defer e.unlock("publishLeaderRole")
+
+	if e.proposalNodePath == "" {
+		e.log.Debug("in the process of resigning, not publishing")
+
+		return
+	}
+
+	e.log.Debug("publishing leader state")
+
+	err := e.zk.Set(e.basePath, e.serializeLeaderInfoUnlocked(), -1)
+	if err != nil {
+		e.log.Errorf("could not publish leader role: %v", err)
+
+		return
+	}
+}
+
+func (e *ZooKeeperElection) claimLeaderRole(ctx context.Context) {
+	e.lock("claimLeaderRole")
+	defer e.unlock("claimLeaderRole")
+
+	e.leaderResignChan = make(chan struct{})
+
+	go func() {
+		t := time.NewTicker(e.sessionTimeout / 2)
+		defer t.Stop()
+		defer e.clearLeaderRole()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-e.leaderResignChan:
+				return
+
+			case <-t.C:
+				e.publishLeaderRole()
+			}
+		}
+	}()
+}
+
 func (e *ZooKeeperElection) Resign(ctx context.Context) error {
-	err := e.deleteProposalNode()
+	e.lock("Resign")
+	close(e.leaderResignChan)
+	err := e.deleteProposalNodeUnlocked()
 	e.proposalNodePath = ""
+	e.unlock("Resign")
 
 	if err != nil {
 		return fmt.Errorf("resign: %w", err)
@@ -309,4 +464,15 @@ func (e *ZooKeeperElection) Resign(ctx context.Context) error {
 	e.log.Info("successfully resigned")
 
 	return nil
+}
+
+func (e *ZooKeeperElection) unlock(name string) {
+	e.mu.Unlock()
+	e.log.Debugf("unlock %s ok", name)
+}
+
+func (e *ZooKeeperElection) lock(name string) {
+	e.log.Debugf("lock %s...", name)
+	e.mu.Lock()
+	e.log.Debugf("lock %s ok", name)
 }
