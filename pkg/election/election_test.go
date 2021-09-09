@@ -80,7 +80,6 @@ var _ = Describe("Election", func() {
 	createElection := func(zk zkClient) *ZooKeeperElection {
 		e := newElectionWithZkClient(zk, basePath, "id1", timeout, l)
 		e.maxRandomWaitDuration = electionJitter
-
 		return e
 	}
 
@@ -454,6 +453,131 @@ var _ = Describe("Election", func() {
 				Fail("should have returned from BecomeLeader but has not")
 			}
 		}, 1)
+
+		It("should publish leader status until resigned", func(done Done) {
+			defer flushTest(done)
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p001",
+				returnChildrenForListChildren:            [][]string{{"p001", "p002"}},
+			}
+
+			e := createElection(zkMock)
+			err := e.BecomeLeader(ctx)
+
+			Expect(err).NotTo(HaveOccurred())
+
+			<-time.After(2 * e.sessionTimeout)
+
+			err = e.Resign(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			// After resignation, should not publish anymore
+
+			<-time.After(2 * e.sessionTimeout)
+
+			zkMock.mu.Lock()
+			defer zkMock.mu.Unlock()
+
+			values := zkMock.calledSetWith[basePath]
+			nValues := len(values)
+
+			// TODO use a discrete timer to avoid not guessing how many times
+			// it'll be approximately be able fire during a time interval
+			Expect(nValues).To(BeNumerically(">=", 2))
+			Expect(nValues).To(BeNumerically("<=", 6))
+
+			for i, v := range values {
+				if i == nValues-1 {
+					// last value set that must be empty, meaning resignation
+					Expect(v).To(BeEmpty())
+
+					continue
+				}
+
+				Expect(v).NotTo(BeEmpty())
+				Expect(v).To(ContainSubstring(`"proposalNode":"/ballot/test/election/p001"`))
+			}
+		}, 2)
+
+		It("should wait if zk leader node already claimed (stale leader node)", func(done Done) {
+			defer flushTest(done)
+			defer GinkgoRecover()
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p001",
+				returnChildrenForListChildren: [][]string{
+					{"p001"},
+					{"p001"},
+					{"p001"},
+					{"p001"},
+				},
+				returnDataForGet: map[string][]zkGetResult{
+					basePath: {
+						{
+							data:      []byte("non-empty string describing leader 1"),
+							mtimeDiff: timeout / 2,
+						},
+						{
+							data:      []byte("non-empty string describing leader 2"),
+							mtimeDiff: timeout / 2,
+						},
+						{
+							data:      []byte("non-empty string describing leader 3"),
+							mtimeDiff: timeout * 2,
+						},
+					},
+				},
+			}
+
+			e := createElection(zkMock)
+			err := e.BecomeLeader(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(zkMock.calledGetNTimes).To(Equal(3))
+			Expect(zkMock.calledListChildrenNTimes).To(Equal(3))
+		})
+
+		It("should wait if zk leader node already claimed (empty data as leader resigned)", func(done Done) {
+			defer flushTest(done)
+			defer GinkgoRecover()
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p001",
+				returnChildrenForListChildren: [][]string{
+					{"p001"},
+					{"p001"},
+					{"p001"},
+					{"p001"},
+				},
+				returnDataForGet: map[string][]zkGetResult{
+					basePath: {
+						{
+							data:      []byte("non-empty string describing leader 1"),
+							mtimeDiff: timeout / 2,
+						},
+						{
+							data:      []byte("non-empty string describing leader 2"),
+							mtimeDiff: timeout / 2,
+						},
+						{
+							data:      []byte{},
+							mtimeDiff: timeout / 2,
+						},
+					},
+				},
+			}
+
+			e := createElection(zkMock)
+			err := e.BecomeLeader(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(zkMock.calledGetNTimes).To(Equal(3))
+			Expect(zkMock.calledListChildrenNTimes).To(Equal(3))
+		})
 	})
 
 	Describe("Resign", func() {
@@ -527,10 +651,39 @@ var _ = Describe("Election", func() {
 			Expect(e.proposalNodePath).To(BeEmpty())
 			Expect(zkMock.calledDeleteWith).To(Equal([]string{proposalNodePath}))
 		})
+
+		It("should stop leader heartbeat publish loop", func() {
+			proposalNodePath := basePath + "/p003"
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: proposalNodePath,
+				returnForDelete:                          errNoNode,
+				returnChildrenForListChildren: [][]string{
+					{"p003"},
+				},
+			}
+			e := createElection(zkMock)
+
+			err := e.BecomeLeader(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = e.Resign(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			select {
+			case _, ok := <-e.leaderResignChan:
+				Expect(ok).To(BeFalse())
+			default:
+				Fail("did not close leader claim chan")
+			}
+		}, 1)
 	})
 })
 
 type mockZkClient struct {
+	mu sync.Mutex
+
 	calledCreateNodeSequenceEphemeralWithPath []string
 	calledCreateNodeSequenceEphemeralWithData [][]byte
 	returnPathForCreateNodeSequenceEphemeral  string
@@ -557,6 +710,17 @@ type mockZkClient struct {
 
 	calledHasSessionNTimes int
 	returnForHasSession    []bool
+
+	calledSetWith map[string][]string
+
+	calledGetNTimes  int
+	returnDataForGet map[string][]zkGetResult
+}
+
+type zkGetResult struct {
+	data      []byte
+	mtimeDiff time.Duration
+	err       error
 }
 
 func (z *mockZkClient) CreateNodeSequenceEphemeral(path string, data []byte) (string, error) {
@@ -612,4 +776,36 @@ func (z *mockZkClient) HasSession() bool {
 	z.calledHasSessionNTimes++
 
 	return ret
+}
+
+func (z *mockZkClient) Events() <-chan zk.Event {
+	return nil
+}
+
+func (z *mockZkClient) Get(path string) ([]byte, *zk.Stat, error) {
+	z.mu.Lock()
+	defer func() {
+		z.calledGetNTimes++
+		z.mu.Unlock()
+	}()
+
+	ret := z.returnDataForGet[path]
+	if z.calledGetNTimes >= len(ret) {
+		return []byte{}, &zk.Stat{}, nil
+	}
+
+	mtime := time.Now().Add(-ret[z.calledGetNTimes].mtimeDiff).UnixNano() / 1_000_000 // ns -> ms
+
+	return ret[z.calledGetNTimes].data, &zk.Stat{Mtime: mtime}, ret[z.calledGetNTimes].err
+}
+
+func (z *mockZkClient) Set(path string, data []byte, v int32) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+
+	if z.calledSetWith == nil {
+		z.calledSetWith = make(map[string][]string)
+	}
+	z.calledSetWith[path] = append(z.calledSetWith[path], string(data))
+	return nil
 }

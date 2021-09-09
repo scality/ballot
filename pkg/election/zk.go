@@ -30,20 +30,25 @@ type zkClient interface {
 	Watch(path string) (<-chan zk.Event, error)
 	WatchChildren(path string) (<-chan zk.Event, error)
 	HasSession() bool
+	Events() <-chan zk.Event
+	Get(path string) ([]byte, *zk.Stat, error)
+	Set(path string, data []byte, v int32) error
 }
 
 type defaultZkClient struct {
 	conn *zk.Conn
+	ec   <-chan zk.Event
 }
 
 func connectZkClient(servers []string, sessionTimeout time.Duration, debug bool, l *logrus.Entry) (*defaultZkClient, error) {
-	conn, _, err := zk.Connect(servers, sessionTimeout, zk.WithLogger(l), zk.WithLogInfo(debug))
+	conn, ec, err := zk.Connect(servers, sessionTimeout, zk.WithLogger(l), zk.WithLogInfo(debug))
 	if err != nil {
 		return nil, fmt.Errorf("zookeeper connect: %w", err)
 	}
 
 	return &defaultZkClient{
 		conn: conn,
+		ec:   ec,
 	}, nil
 }
 
@@ -96,4 +101,17 @@ func (z *defaultZkClient) WatchChildren(path string) (<-chan zk.Event, error) {
 
 func (z *defaultZkClient) HasSession() bool {
 	return z.conn.State() == zk.StateHasSession
+}
+
+func (z *defaultZkClient) Events() <-chan zk.Event {
+	return z.ec
+}
+
+func (z *defaultZkClient) Get(path string) ([]byte, *zk.Stat, error) {
+	return z.conn.Get(path)
+}
+
+func (z *defaultZkClient) Set(path string, data []byte, v int32) error {
+	_, err := z.conn.Set(path, data, v)
+	return err
 }
