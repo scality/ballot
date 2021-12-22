@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/scality/ballot/pkg/cmd/info"
@@ -29,7 +30,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-var flagDebug = "debug"
+const (
+	flagDebug            = "debug"
+	timestampFormat      = time.RFC3339Nano
+	humanTimestampFormat = time.StampNano
+)
 
 var rootCmd = &cobra.Command{
 	Use: os.Args[0],
@@ -75,31 +80,38 @@ func initConfig() {
 
 	log.SetLevel(lvl)
 
+	var formatter log.Formatter
+
 	f := viper.GetString("log-format")
 	switch f {
 	case "json":
-		log.SetFormatter(&log.JSONFormatter{})
+		formatter = &log.JSONFormatter{
+			TimestampFormat: timestampFormat,
+		}
 
 	case "human":
-		log.SetFormatter(&log.TextFormatter{
+		formatter = &log.TextFormatter{
 			QuoteEmptyFields: true,
 			DisableSorting:   true,
-		})
+			FullTimestamp:    true,
+			TimestampFormat:  humanTimestampFormat,
+		}
 
 	case "raw":
-		log.SetFormatter(&log.TextFormatter{
+		formatter = &log.TextFormatter{
 			DisableColors:    true,
 			ForceQuote:       true,
 			FullTimestamp:    true,
+			TimestampFormat:  timestampFormat,
 			QuoteEmptyFields: true,
-		})
+		}
 
 	default:
 		log.Fatalf("invalid log format: %s", f)
 	}
 
+	log.SetFormatter(formatter)
 	log.SetReportCaller(viper.GetBool(flagDebug))
-
 	log.SetOutput(os.Stdout)
 }
 
