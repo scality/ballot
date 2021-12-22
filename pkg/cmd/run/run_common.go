@@ -27,14 +27,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRunner runengine.LeaderRunner, l *logrus.Entry) {
+func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRunner runengine.LeaderRunner, appLogger *logrus.Entry) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "(unknown)"
+	}
+
+	logger := appLogger.WithField("hostname", hostname)
+
 	params, err := conf.ParseRunParams(viper.GetViper())
 	if err != nil {
-		l.Error(err)
+		logger.Error(err)
 		cmd.Help()
 
 		return
 	}
+
+	logger = logger.WithField("candidateId", params.CandidateID)
 
 	el, err := election.NewZooKeeperElection(
 		conf.GetZooKeeperServers(),
@@ -42,21 +51,21 @@ func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRun
 		params.CandidateID,
 		conf.GetZooKeeperSessionTimeout(),
 		params.DebugMode,
-		l.WithField("name", "election"),
+		logger.WithField("name", "election"),
 	)
 	if err != nil {
-		l.Fatal(err)
+		logger.Fatal(err)
 
 		return
 	}
 
 	runner := func() <-chan process.RunStatus {
-		return process.RunChildProcess(ctx, args, cmd.OutOrStdout(), cmd.ErrOrStderr(), params.WrapLogs, l)
+		return process.RunChildProcess(ctx, args, cmd.OutOrStdout(), cmd.ErrOrStderr(), params.WrapLogs, logger)
 	}
 
-	runStatus := leaderRunner(ctx, el, runner, params, l)
+	runStatus := leaderRunner(ctx, el, runner, params, logger)
 	if runStatus.Err != nil {
-		l.Error(runStatus.Err)
+		logger.Error(runStatus.Err)
 	}
 
 	os.Exit(runStatus.ExitCode)
