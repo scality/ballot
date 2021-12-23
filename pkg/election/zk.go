@@ -33,6 +33,8 @@ type zkClient interface {
 	Events() <-chan zk.Event
 	Get(path string) ([]byte, *zk.Stat, error)
 	Set(path string, data []byte, v int32) error
+
+	Disconnect()
 }
 
 type defaultZkClient struct {
@@ -114,4 +116,8 @@ func (z *defaultZkClient) Get(path string) ([]byte, *zk.Stat, error) {
 func (z *defaultZkClient) Set(path string, data []byte, v int32) error {
 	_, err := z.conn.Set(path, data, v)
 	return err
+}
+
+func (z *defaultZkClient) Disconnect() {
+	z.conn.Close()
 }

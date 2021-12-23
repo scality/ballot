@@ -40,7 +40,10 @@ var (
 const (
 	defaultMaxRandomWaitDuration = 2 * time.Second
 	defaultHeartbeatInterval     = 30 * time.Second
+	defaultReinitResignTimeout   = 5 * time.Second
 )
+
+type zkConnectFn func() (zkClient, error)
 
 type ZooKeeperElection struct {
 	candidateID           string
@@ -53,29 +56,40 @@ type ZooKeeperElection struct {
 	zk                    zkClient
 	leaderResignChan      chan struct{}
 	mu                    sync.Mutex
+	connectZK             zkConnectFn
 }
 
 func NewZooKeeperElection(servers []string, electionPath string, candidateID string, sessionTimeout time.Duration, debug bool, l *logrus.Entry) (*ZooKeeperElection, error) {
 	zlog := l.WithField("name", "election-zk-client")
 
-	zk, err := connectZkClient(servers, sessionTimeout, debug, zlog)
-	if err != nil {
-		return nil, fmt.Errorf("zookeeper connection: %w", err)
+	connect := func() (zkClient, error) {
+		zk, err := connectZkClient(servers, sessionTimeout, debug, zlog)
+		if err != nil {
+			return nil, fmt.Errorf("zookeeper connection: %w", err)
+		}
+
+		return zk, nil
 	}
 
-	return newElectionWithZkClient(zk, electionPath, candidateID, sessionTimeout, zlog), nil
+	return newElectionWithZkConnectFn(connect, electionPath, candidateID, sessionTimeout, zlog)
 }
 
-func newElectionWithZkClient(zk zkClient, electionPath string, candidateID string, sessionTimeout time.Duration, l *logrus.Entry) *ZooKeeperElection {
+func newElectionWithZkConnectFn(connect zkConnectFn, electionPath string, candidateID string, sessionTimeout time.Duration, l *logrus.Entry) (*ZooKeeperElection, error) {
+	client, err := connect()
+	if err != nil {
+		return nil, err
+	}
+
 	return &ZooKeeperElection{
-		zk:                    zk,
+		zk:                    client,
+		connectZK:             connect,
 		basePath:              electionPath,
 		candidateID:           candidateID,
 		sessionTimeout:        sessionTimeout,
 		maxRandomWaitDuration: defaultMaxRandomWaitDuration,
 		heartbeatInterval:     defaultHeartbeatInterval,
 		log:                   l,
-	}
+	}, nil
 }
 
 func (e *ZooKeeperElection) serializeCandidateInfo() []byte {
@@ -399,7 +413,11 @@ func (e *ZooKeeperElection) clearLeaderRole() {
 	defer e.unlock("clearLeaderRole")
 
 	err := e.zk.Set(e.basePath, []byte{}, -1)
-	if err != nil {
+	if err != nil && !errors.Is(err, zk.ErrConnectionClosed) {
+		// don't log connections closed errors, as
+		// connections closed mean that the proposal node will
+		// be automatically cleaned up and `/basePath` will have
+		// a stale timestamp
 		e.log.Errorf("could not clear leader role: %v", err)
 	}
 }
@@ -475,4 +493,17 @@ func (e *ZooKeeperElection) lock(name string) {
 	e.log.Debugf("lock %s...", name)
 	e.mu.Lock()
 	e.log.Debugf("lock %s ok", name)
+}
+
+func (e *ZooKeeperElection) Reinit() error {
+	e.zk.Disconnect()
+
+	client, err := e.connectZK()
+	if err != nil {
+		return err
+	}
+
+	e.zk = client
+
+	return nil
 }

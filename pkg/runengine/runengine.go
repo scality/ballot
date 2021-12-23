@@ -24,12 +24,32 @@ import (
 )
 
 func RunAsLeader(ctx context.Context, el election.Election, exec process.ExecuteFunc, params *conf.RunParams, l *logrus.Entry) process.RunStatus {
-	exitCode := 0
-	var runStatusErr error
+	var (
+		exitCode       = 0
+		reinitElection = false
+		runStatusErr   error
+	)
 
 elect:
 	for {
 		l.Info("trying to become leader")
+
+		if reinitElection {
+			// force a zookeeper reconnection, because if the connection is
+			// interrupted then restarted (high latency, lost packets, ...) and
+			// zookeeper still considers it alive (client connection open but
+			// host process deadlocked or some similar hafway situation, where
+			// the client keeps is session id), the ephemeral nodes will still
+			// be there and not cleaned up, deadlocking the election
+			err := el.Reinit()
+			if err != nil {
+				// in case of error, quit and let the process manager restart us,
+				// taking care of any backoff
+				l.Fatalf("unable to reconnect to zookeeper: %v", err)
+			}
+		}
+
+		reinitElection = true
 
 		err := el.BecomeLeader(ctx)
 		if err != nil {

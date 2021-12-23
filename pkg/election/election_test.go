@@ -68,6 +68,16 @@ func (b *byteBuffer) Len() int {
 	return b.b.Len()
 }
 
+func makeZKConnectFn(client zkClient, err error) zkConnectFn {
+	return func() (zkClient, error) {
+		if err != nil {
+			return nil, err
+		}
+
+		return client, nil
+	}
+}
+
 var _ = Describe("Election", func() {
 	var ctx context.Context
 	var logs *byteBuffer
@@ -78,8 +88,10 @@ var _ = Describe("Election", func() {
 	var l *logrus.Entry
 
 	createElection := func(zk zkClient) *ZooKeeperElection {
-		e := newElectionWithZkClient(zk, basePath, "id1", timeout, l)
+		e, err := newElectionWithZkConnectFn(makeZKConnectFn(zk, nil), basePath, "id1", timeout, l)
+		Expect(err).NotTo(HaveOccurred())
 		e.maxRandomWaitDuration = electionJitter
+
 		return e
 	}
 
@@ -808,4 +820,7 @@ func (z *mockZkClient) Set(path string, data []byte, v int32) error {
 	}
 	z.calledSetWith[path] = append(z.calledSetWith[path], string(data))
 	return nil
+}
+
+func (z *mockZkClient) Disconnect() {
 }
