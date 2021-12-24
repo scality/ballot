@@ -32,7 +32,7 @@ type zkClient interface {
 	HasSession() bool
 	Events() <-chan zk.Event
 	Get(path string) ([]byte, *zk.Stat, error)
-	Set(path string, data []byte, v int32) error
+	Set(path string, data []byte, v int32) (int32, error)
 
 	Disconnect()
 }
@@ -113,9 +113,20 @@ func (z *defaultZkClient) Get(path string) ([]byte, *zk.Stat, error) {
 	return z.conn.Get(path)
 }
 
-func (z *defaultZkClient) Set(path string, data []byte, v int32) error {
-	_, err := z.conn.Set(path, data, v)
-	return err
+func (z *defaultZkClient) Set(path string, data []byte, v int32) (int32, error) {
+	var version int32
+
+	stat, err := z.conn.Set(path, data, v)
+
+	if stat != nil {
+		version = stat.Version
+	}
+
+	if err != nil {
+		return version, fmt.Errorf("set: %w", err)
+	}
+
+	return version, nil
 }
 
 func (z *defaultZkClient) Disconnect() {

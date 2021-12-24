@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +31,9 @@ import (
 )
 
 var (
-	errTest   = errors.New("testing")
-	errNoNode = fmt.Errorf("test error: %w", zk.ErrNoNode)
+	errTest                = errors.New("testing")
+	errNoNode              = fmt.Errorf("test error: %w", zk.ErrNoNode)
+	errNodeVersionMismatch = errors.New("version mismatch")
 )
 
 // threadsafe subset of bytes.Buffer
@@ -590,6 +592,76 @@ var _ = Describe("Election", func() {
 			Expect(zkMock.calledGetNTimes).To(Equal(3))
 			Expect(zkMock.calledListChildrenNTimes).To(Equal(3))
 		})
+
+		It("should bail if another instance claimed leadership while transitioning to leader", func(done Done) {
+			defer flushTest(done)
+			defer GinkgoRecover()
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p002",
+				returnDataForGet: map[string][]zkGetResult{
+					basePath: {
+						{
+							data:      []byte("non-empty string describing leader 1"),
+							version:   32,
+							mtimeDiff: timeout * 2,
+						},
+					},
+				},
+				expectSetArgs: []zkSetArgs{
+					{
+						path:    basePath,
+						version: 33,
+					},
+				},
+				returnChildrenForListChildren: [][]string{
+					{"p002", "p003"},
+				},
+			}
+
+			e := createElection(zkMock)
+			err := e.BecomeLeader(ctx)
+			Expect(err).To(MatchError(errNodeVersionMismatch))
+
+			Expect(zkMock.calledGetNTimes).To(Equal(1))
+			Expect(zkMock.calledListChildrenNTimes).To(Equal(1))
+		}, 1)
+
+		It("should succeed if version numbers match", func(done Done) {
+			defer flushTest(done)
+			defer GinkgoRecover()
+
+			zkMock := &mockZkClient{
+				returnForHasSession:                      []bool{true},
+				returnPathForCreateNodeSequenceEphemeral: basePath + "/p002",
+				returnDataForGet: map[string][]zkGetResult{
+					basePath: {
+						{
+							data:      []byte("non-empty string describing leader 1"),
+							version:   32,
+							mtimeDiff: timeout * 2,
+						},
+					},
+				},
+				expectSetArgs: []zkSetArgs{
+					{
+						path:    basePath,
+						version: 32,
+					},
+				},
+				returnChildrenForListChildren: [][]string{
+					{"p002", "p003"},
+				},
+			}
+
+			e := createElection(zkMock)
+			err := e.BecomeLeader(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(zkMock.calledGetNTimes).To(Equal(1))
+			Expect(zkMock.calledListChildrenNTimes).To(Equal(1))
+		}, 1)
 	})
 
 	Describe("Resign", func() {
@@ -723,7 +795,9 @@ type mockZkClient struct {
 	calledHasSessionNTimes int
 	returnForHasSession    []bool
 
-	calledSetWith map[string][]string
+	calledSetNTimes int
+	expectSetArgs   []zkSetArgs
+	calledSetWith   map[string][]string
 
 	calledGetNTimes  int
 	returnDataForGet map[string][]zkGetResult
@@ -732,7 +806,14 @@ type mockZkClient struct {
 type zkGetResult struct {
 	data      []byte
 	mtimeDiff time.Duration
+	version   int32
 	err       error
+}
+
+type zkSetArgs struct {
+	path    string
+	data    *[]byte
+	version int32
 }
 
 func (z *mockZkClient) CreateNodeSequenceEphemeral(path string, data []byte) (string, error) {
@@ -806,20 +887,48 @@ func (z *mockZkClient) Get(path string) ([]byte, *zk.Stat, error) {
 		return []byte{}, &zk.Stat{}, nil
 	}
 
-	mtime := time.Now().Add(-ret[z.calledGetNTimes].mtimeDiff).UnixNano() / 1_000_000 // ns -> ms
+	stat := &zk.Stat{
+		Mtime:   time.Now().Add(-ret[z.calledGetNTimes].mtimeDiff).UnixNano() / 1_000_000, // ns -> ms
+		Version: ret[z.calledGetNTimes].version,
+	}
 
-	return ret[z.calledGetNTimes].data, &zk.Stat{Mtime: mtime}, ret[z.calledGetNTimes].err
+	return ret[z.calledGetNTimes].data, stat, ret[z.calledGetNTimes].err
 }
 
-func (z *mockZkClient) Set(path string, data []byte, v int32) error {
+func (z *mockZkClient) Set(path string, data []byte, v int32) (int32, error) {
 	z.mu.Lock()
-	defer z.mu.Unlock()
+	defer func() {
+		z.calledSetNTimes++
+		z.mu.Unlock()
+	}()
+
+	if len(z.expectSetArgs) > 0 {
+		if z.calledSetNTimes >= len(z.expectSetArgs) {
+			return 0, fmt.Errorf("called set too many times (%d)", z.calledSetNTimes+1)
+		}
+
+		expectedArg := z.expectSetArgs[z.calledSetNTimes]
+
+		if expectedArg.version != v {
+			return 0, fmt.Errorf("expected='%d' got='%d': %w", expectedArg.version, v, errNodeVersionMismatch)
+		}
+
+		if expectedArg.path != path {
+			log.Fatalf("path mismatch: expected='%s' got='%s'", expectedArg.path, path)
+		}
+
+		if expectedArg.data != nil && !bytes.Equal(*expectedArg.data, data) {
+			log.Fatalf("data mismatch: expected='%s' got='%s'", string(*expectedArg.data), string(data))
+		}
+	}
 
 	if z.calledSetWith == nil {
 		z.calledSetWith = make(map[string][]string)
 	}
+
 	z.calledSetWith[path] = append(z.calledSetWith[path], string(data))
-	return nil
+
+	return 0, nil
 }
 
 func (z *mockZkClient) Disconnect() {
