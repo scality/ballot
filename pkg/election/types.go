@@ -19,4 +19,5 @@ import "context"
 type Election interface {
 	BecomeLeader(ctx context.Context) error
 	Resign(ctx context.Context) error
+	Reinit() error
 }

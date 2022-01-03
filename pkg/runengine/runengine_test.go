@@ -39,7 +39,7 @@ func newErrorMockElection() *mockElection {
 	}
 }
 
-func new4ErrorsMockElection() *mockElection {
+func new2ErrorsMockElection() *mockElection {
 	return &mockElection{
 		returnForBecomeLeader: []error{
 			errTestElection,
@@ -64,6 +64,7 @@ type testCase struct {
 	processErrors         []error
 	expectElectionTries   int
 	expectResignations    int
+	expectReinits         int
 	expectProcessRunCount int
 	expectExitCode        int
 	expectError           error
@@ -140,6 +141,7 @@ var _ = Describe("Runengine", func() {
 		Expect(ret.ExitCode).To(Equal(t.expectExitCode))
 		Expect(t.election.becomeLeaderCalledNTimes).To(Equal(t.expectElectionTries))
 		Expect(t.election.calledResignNTimes).To(Equal(t.expectResignations))
+		Expect(t.election.calledReinitNTimes).To(Equal(t.expectReinits))
 		Expect(calledCount).To(Equal(t.expectProcessRunCount))
 
 		if t.expectError != nil {
@@ -199,13 +201,15 @@ var _ = Describe("Runengine", func() {
 					"`retry` should retry to become leader until successful",
 					testCase{
 						runner:                suite.runner,
-						election:              new4ErrorsMockElection(),
+						election:              new2ErrorsMockElection(),
 						runParams:             runParamsElectionFailureRetry,
 						schedule:              suite.schedule,
 						processExitCode:       failureExitCode,
 						expectElectionTries:   3,
 						expectExitCode:        failureExitCode,
 						expectProcessRunCount: 1,
+						// 2 errors in returnForBecomeLeader means 2 reinits as it has to re-try the election after receiving each error
+						expectReinits: 2,
 					},
 				),
 			)
@@ -295,6 +299,8 @@ var _ = Describe("Runengine", func() {
 						expectExitCode:        1,
 						expectError:           errTestElection,
 						expectProcessRunCount: 1,
+						// 1 error in returnForBecomeLeader means 1 reinit as it has to re-try the election after receiving each error
+						expectReinits: 1,
 					},
 				),
 				Entry(
@@ -394,6 +400,8 @@ var _ = Describe("Runengine", func() {
 						expectExitCode:        1,
 						expectError:           errTestElection,
 						expectProcessRunCount: 1,
+						// 1 error in returnForBecomeLeader means 1 reinit as it has to re-try the election after receiving each error
+						expectReinits: 1,
 					},
 				),
 				Entry(
@@ -462,6 +470,8 @@ type mockElection struct {
 
 	returnForResign    []error
 	calledResignNTimes int
+
+	calledReinitNTimes int
 }
 
 func (me *mockElection) BecomeLeader(ctx context.Context) error {
@@ -484,4 +494,10 @@ func (me *mockElection) Resign(ctx context.Context) error {
 	}
 
 	return me.returnForResign[n]
+}
+
+func (me *mockElection) Reinit() error {
+	me.calledReinitNTimes++
+
+	return nil
 }

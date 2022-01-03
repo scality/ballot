@@ -40,7 +40,10 @@ var (
 const (
 	defaultMaxRandomWaitDuration = 2 * time.Second
 	defaultHeartbeatInterval     = 30 * time.Second
+	defaultReinitResignTimeout   = 5 * time.Second
 )
+
+type zkConnectFn func() (zkClient, error)
 
 type ZooKeeperElection struct {
 	candidateID           string
@@ -53,29 +56,40 @@ type ZooKeeperElection struct {
 	zk                    zkClient
 	leaderResignChan      chan struct{}
 	mu                    sync.Mutex
+	connectZK             zkConnectFn
 }
 
 func NewZooKeeperElection(servers []string, electionPath string, candidateID string, sessionTimeout time.Duration, debug bool, l *logrus.Entry) (*ZooKeeperElection, error) {
 	zlog := l.WithField("name", "election-zk-client")
 
-	zk, err := connectZkClient(servers, sessionTimeout, debug, zlog)
-	if err != nil {
-		return nil, fmt.Errorf("zookeeper connection: %w", err)
+	connect := func() (zkClient, error) {
+		zk, err := connectZkClient(servers, sessionTimeout, debug, zlog)
+		if err != nil {
+			return nil, fmt.Errorf("zookeeper connection: %w", err)
+		}
+
+		return zk, nil
 	}
 
-	return newElectionWithZkClient(zk, electionPath, candidateID, sessionTimeout, zlog), nil
+	return newElectionWithZkConnectFn(connect, electionPath, candidateID, sessionTimeout, zlog)
 }
 
-func newElectionWithZkClient(zk zkClient, electionPath string, candidateID string, sessionTimeout time.Duration, l *logrus.Entry) *ZooKeeperElection {
+func newElectionWithZkConnectFn(connect zkConnectFn, electionPath string, candidateID string, sessionTimeout time.Duration, l *logrus.Entry) (*ZooKeeperElection, error) {
+	client, err := connect()
+	if err != nil {
+		return nil, err
+	}
+
 	return &ZooKeeperElection{
-		zk:                    zk,
+		zk:                    client,
+		connectZK:             connect,
 		basePath:              electionPath,
 		candidateID:           candidateID,
 		sessionTimeout:        sessionTimeout,
 		maxRandomWaitDuration: defaultMaxRandomWaitDuration,
 		heartbeatInterval:     defaultHeartbeatInterval,
 		log:                   l,
-	}
+	}, nil
 }
 
 func (e *ZooKeeperElection) serializeCandidateInfo() []byte {
@@ -320,6 +334,8 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		return fmt.Errorf("leader election: %w", err)
 	}
 
+	var expectVersion int32
+
 	for {
 		prev, err := e.getPreviousProposal()
 		if err != nil {
@@ -329,7 +345,10 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		hasLowestProposal := prev == ""
 
 		if hasLowestProposal {
-			if e.hasActiveLeader() {
+			e.log.Debug("got the lowest proposal")
+
+			hasActiveLeader, lastSeenVersion := e.hasActiveLeader()
+			if hasActiveLeader {
 				// It is possible to have the lowest proposal and not be the
 				// actual leader, if all the previous ephemeral nodes have been
 				// auto-expired and there's still a leader running the process.
@@ -343,7 +362,7 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 				continue
 			}
 
-			e.log.Info("am leader, continuing")
+			expectVersion = lastSeenVersion
 
 			break
 		} else {
@@ -358,7 +377,17 @@ func (e *ZooKeeperElection) BecomeLeader(ctx context.Context) error {
 		}
 	}
 
-	e.claimLeaderRole(ctx)
+	e.log.WithField("expectNodeVersion", expectVersion).Info("am leader, trying to claim")
+
+	expectVersion2, err := e.publishLeaderRole(expectVersion)
+	if err != nil {
+		return fmt.Errorf("unable to claim leadership (expected version %d, found %d): %w",
+			expectVersion, expectVersion2, err)
+	}
+
+	e.log.Info("am leader, claim ok, continuing")
+
+	e.publishLeaderRoleBackgroundTask(ctx, expectVersion2)
 
 	return nil
 }
@@ -367,7 +396,7 @@ func convertMsEpochToTime(ms int64) time.Time {
 	return time.Unix(ms/1000, (ms%1000)*1_000_000)
 }
 
-func (e *ZooKeeperElection) hasActiveLeader() bool {
+func (e *ZooKeeperElection) hasActiveLeader() (bool, int32) {
 	e.log.Info("checking if there is an active leader")
 
 	data, stat, err := e.zk.Get(e.basePath)
@@ -377,63 +406,71 @@ func (e *ZooKeeperElection) hasActiveLeader() bool {
 		// if we can't reach zk, assume there's already a
 		// leader, as we don't want to risk a split brain
 		// election
-		return true
+		return true, 0
 	}
 
+	version := stat.Version
 	mtime := convertMsEpochToTime(stat.Mtime)
 	since := time.Since(mtime)
 	hasActiveLeader := since < e.sessionTimeout && len(data) > 0
 
-	e.log.Debugf("active leader info: hasActiveLeader=%v descr=%s since=%s threshold=%s",
-		hasActiveLeader, string(data), since.String(), e.sessionTimeout.String())
+	e.log.Debugf("active leader info: hasActiveLeader=%v descr=%s since=%s threshold=%s nodeversion=%d",
+		hasActiveLeader, string(data), since.String(), e.sessionTimeout.String(), version)
 
 	if hasActiveLeader {
 		e.log.Infof("active leader '%s' was seen %s ago", string(data), since.String())
 	}
 
-	return hasActiveLeader
+	return hasActiveLeader, version
 }
 
-func (e *ZooKeeperElection) clearLeaderRole() {
+func (e *ZooKeeperElection) clearLeaderRole(expectVersion int32) {
 	e.lock("clearLeaderRole")
 	defer e.unlock("clearLeaderRole")
 
-	err := e.zk.Set(e.basePath, []byte{}, -1)
-	if err != nil {
+	_, err := e.zk.Set(e.basePath, []byte{}, expectVersion)
+	if err != nil && !errors.Is(err, zk.ErrConnectionClosed) {
+		// don't log connections closed errors, as
+		// connections closed mean that the proposal node will
+		// be automatically cleaned up and `/basePath` will have
+		// a stale timestamp
 		e.log.Errorf("could not clear leader role: %v", err)
 	}
 }
 
-func (e *ZooKeeperElection) publishLeaderRole() {
+func (e *ZooKeeperElection) publishLeaderRole(expectVersion int32) (int32, error) {
 	e.lock("publishLeaderRole")
 	defer e.unlock("publishLeaderRole")
 
 	if e.proposalNodePath == "" {
 		e.log.Debug("in the process of resigning, not publishing")
 
-		return
+		return 0, nil
 	}
 
 	e.log.Debug("publishing leader state")
 
-	err := e.zk.Set(e.basePath, e.serializeLeaderInfoUnlocked(), -1)
+	foundVersion, err := e.zk.Set(e.basePath, e.serializeLeaderInfoUnlocked(), expectVersion)
 	if err != nil {
-		e.log.Errorf("could not publish leader role: %v", err)
-
-		return
+		return foundVersion, fmt.Errorf("publish leader role: %w", err)
 	}
+
+	e.log.Debugf("published leader state expectv=%d newv=%d", expectVersion, foundVersion)
+
+	return foundVersion, nil
 }
 
-func (e *ZooKeeperElection) claimLeaderRole(ctx context.Context) {
+func (e *ZooKeeperElection) publishLeaderRoleBackgroundTask(ctx context.Context, expectVersion int32) {
 	e.lock("claimLeaderRole")
 	defer e.unlock("claimLeaderRole")
 
 	e.leaderResignChan = make(chan struct{})
+	localExpectVersion := expectVersion
 
 	go func() {
 		t := time.NewTicker(e.sessionTimeout / 2)
 		defer t.Stop()
-		defer e.clearLeaderRole()
+		defer e.clearLeaderRole(localExpectVersion)
 
 		for {
 			select {
@@ -444,7 +481,12 @@ func (e *ZooKeeperElection) claimLeaderRole(ctx context.Context) {
 				return
 
 			case <-t.C:
-				e.publishLeaderRole()
+				foundVersion, err := e.publishLeaderRole(localExpectVersion)
+				if err != nil {
+					e.log.Errorf("leader claim loop: %v", err)
+				}
+
+				localExpectVersion = foundVersion
 			}
 		}
 	}()
@@ -475,4 +517,17 @@ func (e *ZooKeeperElection) lock(name string) {
 	e.log.Debugf("lock %s...", name)
 	e.mu.Lock()
 	e.log.Debugf("lock %s ok", name)
+}
+
+func (e *ZooKeeperElection) Reinit() error {
+	e.zk.Disconnect()
+
+	client, err := e.connectZK()
+	if err != nil {
+		return err
+	}
+
+	e.zk = client
+
+	return nil
 }
