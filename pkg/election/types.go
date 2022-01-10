@@ -14,12 +14,19 @@
 
 package election
 
-import "context"
+import (
+	"context"
+)
 
 type Election interface {
 	BecomeLeader(ctx context.Context) error
 	Resign(ctx context.Context) error
 	Reinit() error
+}
+
+type ZooKeeperElectionStatus struct {
+	Leader     LeaderInfo      `json:"leader" yaml:"leader,omitempty"`
+	Candidates []CandidateInfo `json:"candidates" yaml:"allCandidates,omitempty"`
 }
 
 type CandidateInfo struct {

@@ -156,14 +156,91 @@ invocation queueing, allowing concurrent invocations.
 
 ### Info
 
-Not implemented yet.
+The info command shows the current state of the election:
+
+- The current leader
+- The list of candidates
+- Data about each entry (proposal, last seen time, host, pid, candidate id, etc)
+- Notes about each entry that could have an effect on the current election.
+  These notes often include conditional phrasing, because they are observations
+  based on heuristics, as it is often not possible to know what really is
+  happening until later.
 
 #### Options
 
-| Parameter | Description | Default | Allowed values |
-| --- | --- | --- | --- |
+See Global Configuration for common options.
 
 #### Examples
+
+Here is an example of an election where the leader just resigned (for example
+because its child process completed successfully, and the configured policy is
+`reelect`). We can see that `candidate-2` is well positioned to be the leader,
+but is prevented by `candidate-5` which still holds a lease (`last heartbeat
+2.242563s ago`). When `candidate-5`'s heartbeat misses (2.75s from now, or
+`sessionTimeout/2` after its last heartbeat), `candidate-2` will proceed with
+leadership.
+
+```yaml
+$ ballot --zookeeper-servers localhost:2181 --zookeeper-base-path /ballot/myservice info
+leader:
+  id: candidate-5
+  host: host-5
+  pid: "25048"
+  proposalTime: 2022-01-07 13:40:17.537208 -0800 PST m=+1.119309658
+  proposalNode: /ballot/myservice/proposal-0000031785
+  sessionTimeout: 10s
+  notes:
+  - is leader
+  - last heartbeat 2.242563s ago
+  - possibly resigning
+  - election may be in progress
+  lastSeenTime: 2022-01-07 13:40:47.55661 -0800 PST m=+31.138087501
+allCandidates:
+- id: candidate-2
+  host: host-2
+  pid: "5967"
+  proposalTime: 2022-01-07 13:40:17.540773 -0800 PST m=+1.111020024
+  proposalNode: /ballot/myservice/proposal-0000031786
+  sessionTimeout: 10s
+  notes:
+  - should be leader but another candidate is claiming the role
+  - possibly waiting for previous leader resignation
+  - proposal node created 32.259036s ago
+- id: candidate-3
+  host: host-3
+  pid: "6516"
+  proposalTime: 2022-01-07 13:40:17.540755 -0800 PST m=+1.112006091
+  proposalNode: /ballot/myservice/proposal-0000031787
+  sessionTimeout: 10s
+  notes:
+  - proposal node created 32.259585s ago
+- id: candidate-1
+  host: host-1
+  pid: "152"
+  proposalTime: 2022-01-07 13:40:17.540778 -0800 PST m=+1.113612800
+  proposalNode: /ballot/myservice/proposal-0000031788
+  sessionTimeout: 10s
+  notes:
+  - proposal node created 32.260036s ago
+- id: candidate-4
+  host: host-4
+  pid: "8053"
+  proposalTime: 2022-01-07 13:40:17.540928 -0800 PST m=+1.123033944
+  proposalNode: /ballot/myservice/proposal-0000031789
+  sessionTimeout: 10s
+  notes:
+  - proposal node created 32.260125s ago
+- id: candidate-5
+  host: host-5
+  pid: "4389"
+  proposalTime: 2022-01-07 13:40:47.827953 -0800 PST m=+31.409424660
+  proposalNode: /ballot/myservice/proposal-0000031790
+  sessionTimeout: 10s
+  notes:
+  - this candidate id claimed leadership
+  - proposal node created 1.973348s ago
+
+```
 
 ### Watch
 
