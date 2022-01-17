@@ -50,6 +50,7 @@ type ZooKeeperElection struct {
 	log                   *logrus.Entry
 	basePath              string
 	proposalNodePath      string
+	proposalTime          time.Time
 	sessionTimeout        time.Duration
 	maxRandomWaitDuration time.Duration
 	heartbeatInterval     time.Duration
@@ -92,21 +93,28 @@ func newElectionWithZkConnectFn(connect zkConnectFn, electionPath string, candid
 	}, nil
 }
 
-func (e *ZooKeeperElection) serializeCandidateInfo() []byte {
+func (e *ZooKeeperElection) getCandidateInfoUnlocked(proposalTime time.Time) CandidateInfo {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "(unknown)"
 	}
 
-	candidateInfo := map[string]string{
-		"candidateId":    e.candidateID,
-		"hostname":       hostname,
-		"pid":            fmt.Sprint(os.Getpid()),
-		"proposalTime":   time.Now().String(),
-		"sessionTimeout": e.sessionTimeout.String(),
+	return CandidateInfo{
+		CandidateID:    e.candidateID,
+		Hostname:       hostname,
+		PID:            fmt.Sprint(os.Getpid()),
+		ProposalTime:   proposalTime.String(),
+		ProposalNode:   e.proposalNodePath,
+		SessionTimeout: e.sessionTimeout.String(),
 	}
+}
 
-	data, err := json.Marshal(candidateInfo)
+func (e *ZooKeeperElection) serializeCandidateInfo(proposalTime time.Time) []byte {
+	e.lock("serializeCandidateInfo")
+	ci := e.getCandidateInfoUnlocked(proposalTime)
+	e.unlock("serializeCandidateInfo")
+
+	data, err := json.Marshal(ci)
 	if err != nil {
 		e.log.Warn("could not serialize candidate info", err)
 
@@ -117,18 +125,9 @@ func (e *ZooKeeperElection) serializeCandidateInfo() []byte {
 }
 
 func (e *ZooKeeperElection) serializeLeaderInfoUnlocked() []byte {
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "(unknown)"
-	}
-
-	leaderInfo := map[string]string{
-		"proposalNode":   e.proposalNodePath,
-		"candidateId":    e.candidateID,
-		"hostname":       hostname,
-		"pid":            fmt.Sprint(os.Getpid()),
-		"lastSeenTime":   time.Now().String(),
-		"sessionTimeout": e.sessionTimeout.String(),
+	leaderInfo := LeaderInfo{
+		CandidateInfo: e.getCandidateInfoUnlocked(e.proposalTime),
+		LastSeenTime:  time.Now().String(),
 	}
 
 	data, err := json.Marshal(leaderInfo)
@@ -142,7 +141,9 @@ func (e *ZooKeeperElection) serializeLeaderInfoUnlocked() []byte {
 }
 
 func (e *ZooKeeperElection) createProposalNode() error {
-	ownPath, err := e.zk.CreateNodeSequenceEphemeral(e.basePath+"/proposal-", e.serializeCandidateInfo())
+	proposalTime := time.Now()
+
+	ownPath, err := e.zk.CreateNodeSequenceEphemeral(e.basePath+"/proposal-", e.serializeCandidateInfo(proposalTime))
 	if err != nil {
 		return fmt.Errorf("zk create proposal znode: %w", err)
 	}
@@ -152,6 +153,7 @@ func (e *ZooKeeperElection) createProposalNode() error {
 
 	e.log.Debugf("own proposal zk node %s", ownPath)
 	e.proposalNodePath = ownPath
+	e.proposalTime = proposalTime
 
 	return nil
 }
@@ -497,6 +499,7 @@ func (e *ZooKeeperElection) Resign(ctx context.Context) error {
 	close(e.leaderResignChan)
 	err := e.deleteProposalNodeUnlocked()
 	e.proposalNodePath = ""
+	e.proposalTime = time.Time{}
 	e.unlock("Resign")
 
 	if err != nil {

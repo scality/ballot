@@ -1,4 +1,4 @@
-// Copyright 2021 Scality, Inc
+// Copyright 2021-2022 Scality, Inc
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ const (
 	flagZooKeeperBasePath       = "zookeeper-base-path"
 	flagZooKeeperSessionTimeout = "zookeeper-session-timeout"
 	flagDebugMode               = "debug"
+	flagOutputFormat            = "output-format"
 )
 
 var defaultZooKeeperSessionTimeout = 5 * time.Second
@@ -55,6 +56,14 @@ func GetZooKeeperBasePath() string {
 
 func GetZooKeeperSessionTimeout() time.Duration {
 	return viper.GetDuration(flagZooKeeperSessionTimeout)
+}
+
+func GetDebugMode() bool {
+	return viper.GetBool(flagDebugMode)
+}
+
+func GetOutputFormat() string {
+	return viper.GetString(flagOutputFormat)
 }
 
 var errInvalidOnElectionFailureFlag = errors.New("invalid value for " + flagOnElectionFailure)
@@ -143,7 +152,7 @@ func ParseRunParams(v *viper.Viper) (*RunParams, error) {
 		CandidateID:       v.GetString(flagCandidateID),
 		Schedule:          v.GetString(flagSchedule),
 		MultipleRuns:      v.IsSet(flagSchedule),
-		DebugMode:         v.GetBool(flagDebugMode),
+		DebugMode:         GetDebugMode(),
 	}
 
 	return params, nil
@@ -166,6 +175,12 @@ func AddRunFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().String(flagCandidateID, "", "Candidate id")
 	cmd.MarkPersistentFlagRequired(flagCandidateID)
+
+	viper.BindPFlags(cmd.PersistentFlags())
+}
+
+func AddInfoFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().StringP(flagOutputFormat, "o", "yaml", "Output format\nOne of \"yaml\", \"json\"")
 
 	viper.BindPFlags(cmd.PersistentFlags())
 }
