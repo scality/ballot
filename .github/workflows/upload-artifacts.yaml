@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
           go-version: 1.15
 
@@ -29,44 +29,16 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref }}
-          release_name: Release ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: Release ${{ env.VERSION }}
           draft: false
           prerelease: false
-
-      - name: Upload Tarball
-        id: upload-tarball
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./out/ballot-${{ env.VERSION }}.tgz
-          asset_name: ballot-${{ env.VERSION }}.tgz
-          asset_content_type: application/tar+gzip
-
-      - name: Upload Linux amd64 binary
-        id: upload-linux-amd64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-linux-amd64
-          asset_name: ballot-${{ env.VERSION }}-linux-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload MacOS amd64 binary
-        id: upload-darwin-amd64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-darwin-amd64
-          asset_name: ballot-${{ env.VERSION }}-darwin-amd64
-          asset_content_type: application/octet-stream
+          files: |
+            ./out/ballot-${{ env.VERSION }}.tgz
+            ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-linux-amd64
+            ./out/ballot-${{ env.VERSION }}/ballot-${{ env.VERSION }}-darwin-amd64
