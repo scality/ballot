@@ -253,6 +253,31 @@ Not implemented yet.
 
 #### Examples
 
+### Supervise
+
+Manage a service running under supervisord
+
+```ini
+# supervisord.conf
+
+[unix_http_server]
+file = %(ENV_SUP_RUN_DIR)s/supervisor.sock
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[eventlistener:ballot]
+command=/usr/local/bin/ballot supervise --candidate-id candidate_1 --target-service my_service
+events=PROCESS_STATE
+stderr_logfile = /logs/ballot.log
+
+[program:my_service]
+command = bash -c "sleep 30"
+autorestart = false
+autostart = false
+```
+
+
 ## Contributing
 
 In order to contribute, please follow the

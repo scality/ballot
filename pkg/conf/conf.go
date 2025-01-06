@@ -34,6 +34,8 @@ const (
 	flagZooKeeperSessionTimeout = "zookeeper-session-timeout"
 	flagDebugMode               = "debug"
 	flagOutputFormat            = "output-format"
+	flagSupervisordSocket       = "supervisord-socket"
+	flagTargetService           = "target-service"
 )
 
 var defaultZooKeeperSessionTimeout = 5 * time.Second
@@ -183,4 +185,24 @@ func AddInfoFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().StringP(flagOutputFormat, "o", "yaml", "Output format\nOne of \"yaml\", \"json\"")
 
 	viper.BindPFlags(cmd.PersistentFlags())
+}
+
+func AddSupervisordFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().String(flagSupervisordSocket, "/var/run/supervisor/supervisor.sock", "Supervisord socket path")
+
+	cmd.PersistentFlags().String(flagTargetService, "", "Target service name")
+	cmd.MarkPersistentFlagRequired(flagTargetService)
+
+	cmd.PersistentFlags().String(flagCandidateID, "", "Candidate id")
+	cmd.MarkPersistentFlagRequired(flagCandidateID)
+
+	viper.BindPFlags(cmd.PersistentFlags())
+}
+
+func GetSupervisordSocket() string {
+	return viper.GetString(flagSupervisordSocket)
+}
+
+func GetTargetService() string {
+	return viper.GetString(flagTargetService)
 }

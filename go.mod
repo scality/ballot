@@ -4,6 +4,7 @@ go 1.15
 
 require (
 	github.com/go-zookeeper/zk v1.0.2
+	github.com/kolo/xmlrpc v0.0.0-20220921171641-a4b6fa1dd06b
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/onsi/ginkgo v1.15.0
 	github.com/onsi/gomega v1.10.4

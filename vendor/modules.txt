@@ -16,6 +16,9 @@ github.com/hashicorp/hcl/json/scanner
 github.com/hashicorp/hcl/json/token
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
+# github.com/kolo/xmlrpc v0.0.0-20220921171641-a4b6fa1dd06b
+## explicit
+github.com/kolo/xmlrpc
 # github.com/magiconair/properties v1.8.1
 github.com/magiconair/properties
 # github.com/mitchellh/go-homedir v1.1.0

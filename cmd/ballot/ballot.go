@@ -23,6 +23,7 @@ import (
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/scality/ballot/pkg/cmd/info"
 	"github.com/scality/ballot/pkg/cmd/run"
+	"github.com/scality/ballot/pkg/cmd/supervise"
 	"github.com/scality/ballot/pkg/cmd/watch"
 	"github.com/scality/ballot/pkg/conf"
 	log "github.com/sirupsen/logrus"
@@ -112,7 +113,7 @@ func initConfig() {
 
 	log.SetFormatter(formatter)
 	log.SetReportCaller(viper.GetBool(flagDebug))
-	log.SetOutput(os.Stdout)
+	log.SetOutput(os.Stderr)
 }
 
 func main() {
@@ -135,6 +136,7 @@ func main() {
 	run.Add(rootCmd)
 	info.Add(rootCmd)
 	watch.Add(rootCmd)
+	supervise.Add(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
