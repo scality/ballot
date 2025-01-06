@@ -67,7 +67,8 @@ func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRun
 		return
 	}
 
-	monitor := supervisord.NewMonitor(cmd.InOrStdin(), cmd.OutOrStdout())
+	serviceName := conf.GetTargetService()
+	monitor := supervisord.NewMonitor(cmd.InOrStdin(), cmd.OutOrStdout(), serviceName)
 
 	go func() {
 		if err := monitor.Listen(ctx); err != nil {
@@ -75,14 +76,18 @@ func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRun
 		}
 	}()
 
-	serviceName := conf.GetTargetService()
-
 	runner := func() <-chan process.RunStatus {
 		c := make(chan process.RunStatus)
 		go func() {
-			defer close(c)
-			serviceEvs, stop := monitor.Watch(serviceName)
-			defer stop()
+			ctx, cancel := context.WithCancel(ctx)
+
+			go func() {
+				defer close(c)
+				defer cancel()
+				proc := monitor.WaitForNextExit(ctx)
+				logger.Infof("Process %s exited", proc.Name)
+				c <- process.RunStatus{}
+			}()
 
 			started, err := supervd.StartProcess(serviceName, false)
 			if err != nil {
@@ -91,27 +96,11 @@ func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRun
 					ExitCode: 1,
 					Err:      err,
 				}
+				cancel()
 				return
 			}
 
 			logger.Infof("Started %s: %v", serviceName, started)
-			// fmt.Fprintf(os.Stderr, "Started %s: %v\n", serviceName, started)
-
-			for ev := range serviceEvs {
-				if ev.State == supervisord.Stopped {
-					c <- process.RunStatus{
-						ExitCode: 0,
-						Err:      nil,
-					}
-					return
-				} else if ev.State == supervisord.Exited {
-					c <- process.RunStatus{
-						ExitCode: 1,
-						Err:      nil,
-					}
-					return
-				}
-			}
 		}()
 		return c
 	}

@@ -16,29 +16,29 @@ type Process struct {
 	PID   int
 }
 
-func (proc *Process) updateFromListener(event Event) error {
+func ProcessFromEvent(event Event) (proc Process, err error) {
 	name, ok := event.Meta["processname"]
 	if !ok {
-		return errors.New("processname not found in metadata")
+		err = errors.New("processname not found in metadata")
+		return
 	}
 
 	var pid int
 	var str string
-	var err error
 
 	if str, ok = event.Meta["pid"]; ok {
 		if pid, err = strconv.Atoi(str); err != nil {
-			return err
+			return
 		}
 	}
 
 	state := event.State()
-	if state == Stopped {
+	if state == Stopped || state == Exited {
 		pid = 0
 	}
 
 	proc.Name = name
 	proc.State = state
 	proc.PID = pid
-	return nil
+	return
 }
