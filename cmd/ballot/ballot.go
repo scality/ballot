@@ -113,7 +113,7 @@ func initConfig() {
 
 	log.SetFormatter(formatter)
 	log.SetReportCaller(viper.GetBool(flagDebug))
-	log.SetOutput(os.Stderr)
+	log.SetOutput(os.Stdout)
 }
 
 func main() {

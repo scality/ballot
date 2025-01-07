@@ -28,7 +28,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func runCommon(ctx context.Context, cmd *cobra.Command, args []string, leaderRunner runengine.LeaderRunner, appLogger *logrus.Entry) {
+func runCommon(ctx context.Context, cmd *cobra.Command, leaderRunner runengine.LeaderRunner, appLogger *logrus.Entry) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "(unknown)"

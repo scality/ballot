@@ -16,6 +16,7 @@ package supervise
 
 import (
 	"context"
+	"os"
 
 	"github.com/scality/ballot/pkg/conf"
 	"github.com/scality/ballot/pkg/runengine"
@@ -29,9 +30,12 @@ var superviseCmd = cobra.Command{
 	Short: "Starts a supervisord service after acquiring leadership from a ZooKeeper cluster",
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
+		// stdout is used for event listener protocol
+		// application logs must go to stderr
+		log.SetOutput(os.Stderr)
 		rootLog := log.StandardLogger().WithContext(ctx).WithField("name", "cmd-supervise")
 
-		runCommon(ctx, cmd, args, runengine.RunAsLeader, rootLog)
+		runCommon(ctx, cmd, runengine.RunAsLeader, rootLog)
 	},
 }
 
